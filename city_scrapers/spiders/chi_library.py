@@ -6,7 +6,8 @@ specification (http://docs.opencivicdata.org/en/latest/data/event.html).
 import re
 import requests
 import json
-import datetime
+import scrapy
+from datetime import datetime, timedelta
 
 from city_scrapers.spider import Spider
 
@@ -36,13 +37,13 @@ class Chi_librarySpider(Spider):
         # per event. The first line is *always* the date, the last line is *always* the address.
         # IF the event has 3 lines, then line 2 and 3 should be concatenated to be the location.
         #Otherwise, the event has 3 lines and the middle line is the location.
-        events = response.css('div.entry-content p').extract()
-        year = response.css('div.entry-content h2').extract()
-
         def cleanhtml(raw_html):
             cleanr = re.compile('<.*?>')
             cleantext = re.sub(cleanr, '', raw_html)
             return cleantext
+
+        events = response.css('div.entry-content p').extract()
+        year = response.css('div.entry-content h2').extract()
 
         all_clean_events = []
         for val in events:
@@ -58,22 +59,24 @@ class Chi_librarySpider(Spider):
         lib_info = self._get_lib_info()
 
         for item in events_only:
-            yr = cleanhtml(year[0])
-            start_time = self._parse_start(item, yr)
+            date = item[0]
+            date = re.sub(r'(,|\.)', '', date) + ' ' + cleanhtml(year[0])
+            dt_obj = datetime.strptime(date, '%A %B %d %I %p %Y')
+
             data = {
                 '_type': 'event',
                 'name': 'Chicago Public Library Board Meeting',
                 'description': description_str,
                 'classification': 'Board meeting',
-                'start_time': start_time,
-                'end_time': None,  # no end time listed
                 'all_day': False,  # default is false
                 'timezone': 'America/Chicago',
                 'status': self._parse_status(item),  # default is tentative, but there is no status info on site
                 'location': self._parse_location(item, lib_info),
-                'sources': self._parse_sources(response)
+                'sources': self._parse_sources(response),
+                'documents': self._parse_documents(dt_obj)
             }
             data['id'] = self._generate_id(data)
+            data.update(self._parse_datetimes(dt_obj))
             yield data
 
     def _get_lib_info(self):
@@ -139,17 +142,35 @@ class Chi_librarySpider(Spider):
                 match = lib_info[i]
                 return match['address'] + ', ' + match['city'] + ' ' + match['state'] + ' ' + match['zip']
 
-    def _parse_start(self, item, year):
+    def _parse_datetimes(self, dt_obj):
         """
         Parse start date and time.
         """
         # TODO: turn every event array's first string into correct date format
-        date = item[0]
-        date = date.replace(',', '')
-        date = date.replace('.', '')
-        date = date + ' ' + year
-        datetime_object = datetime.datetime.strptime(date, '%A %B %d %I %p %Y')
-        return self._naive_datetime_to_tz(datetime_object)
+        date = dt_obj.date()
+        return {
+            'start': {
+                'date': date,
+                'time': dt_obj.time(),
+                'note': ''
+            },
+            'end': {
+                'date': date,
+                'time': (dt_obj + timedelta(hours=3)).time(),
+                'note': 'End time is estimated to be 3 hours after the start time'
+            }
+        }
+
+    def _parse_documents(self, dt_obj):
+        """
+        Go to the page for the meeting and scrape the agenda, notes, etc from that page
+        """
+        url = 'https://www.chipublib.org/news/board-of-directors-meeting-agenda-' + dt_obj.strftime('%B-%d-%Y')
+        yield scrapy.Request(url, callback=self._parse_document_page, dont_filter=True)
+
+    def _parse_document_page(self, response):
+        import pdb; pdb.set_trace()
+        return []
 
     def _parse_sources(self, response):
         """
